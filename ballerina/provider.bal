@@ -25,7 +25,7 @@ const DEFAULT_TEMPERATURE = 0.7d;
 public isolated client class Provider {
     *ai:ModelProvider;
     private final chat:Client llmClient;
-    private final string modelType;
+    private final OPEN_AI_MODEL_NAMES modelType;
 
     # Initializes the OpenAI model with the given connection configuration and model configuration.
     #
@@ -84,9 +84,10 @@ public isolated client class Provider {
         chat:CreateChatCompletionRequest request = {
             stop,
             model: self.modelType,
-            messages: self.mapToChatCompletionRequestMessage(messages)
+            messages: self.mapToChatCompletionRequestMessage(messages, tools)
         };
-        if tools.length() > 0 {
+        boolean canCallTools = isToolCallSupported(self.modelType);
+        if canCallTools && tools.length() > 0 {
             request.functions = tools;
         }
         chat:CreateChatCompletionResponse|error response = self.llmClient->/chat/completions.post(request);
@@ -97,32 +98,31 @@ public isolated client class Provider {
         if choices.length() == 0 {
             return error ai:LlmInvalidResponseError("Empty response from the model when using function call API");
         }
-        chat:ChatCompletionResponseMessage? message = choices[0].message;
-        ai:ChatAssistantMessage chatAssistantMessage = {role: ai:ASSISTANT, content: message?.content};
-        chat:ChatCompletionRequestAssistantMessage_function_call? function_call = message?.function_call;
-        if function_call is chat:ChatCompletionRequestAssistantMessage_function_call {
-            chatAssistantMessage.toolCalls = [
-                {
-                    name: function_call.name,
-                    arguments: function_call.arguments
-                }
-            ];
-        }
-        return chatAssistantMessage;
+        return self.mapToChatAssistantMessage(choices[0].message);
     }
 
-    private isolated function mapToChatCompletionRequestMessage(ai:ChatMessage[] messages)
+    private isolated function mapToChatCompletionRequestMessage(ai:ChatMessage[] messages, ai:ChatCompletionFunctions[] tools)
         returns chat:ChatCompletionRequestMessage[] {
         chat:ChatCompletionRequestMessage[] chatCompletionRequestMessages = [];
+        boolean canCallTools = isToolCallSupported(self.modelType);
         foreach ai:ChatMessage message in messages {
-            if message is ai:ChatAssistantMessage {
+            if message is ai:ChatSystemMessage && !canCallTools {
+                string reactPrompt = constructReActPrompt(extractToolInfo(tools), message.content);
+                chatCompletionRequestMessages.push({role: ai:SYSTEM, content: reactPrompt});
+            } else if message is ai:ChatAssistantMessage {
                 chat:ChatCompletionRequestAssistantMessage assistantMessage = {role: ai:ASSISTANT};
                 ai:FunctionCall[]? toolCalls = message.toolCalls;
-                if toolCalls is ai:FunctionCall[] {
+                if canCallTools && toolCalls is ai:FunctionCall[] {
                     assistantMessage.function_call = toolCalls[0];
+                } else if !canCallTools && toolCalls is ai:FunctionCall[] {
+                    // assistantMessage.content = toolCalls[0].toJsonString();
+                    assistantMessage = mapFunctionCallToJsonBlob(toolCalls[0]);
                 }
-                if message?.content is string {
-                    assistantMessage.content = message?.content;
+                string? content = message?.content;
+                if canCallTools && content is string {
+                    assistantMessage.content = content;
+                } else if !canCallTools && content is string {
+                    assistantMessage = mapToFinalAnswer(content);
                 }
                 chatCompletionRequestMessages.push(assistantMessage);
             } else {
@@ -131,4 +131,59 @@ public isolated client class Provider {
         }
         return chatCompletionRequestMessages;
     }
+
+    private isolated function mapToChatAssistantMessage(chat:ChatCompletionResponseMessage? message) returns ai:ChatAssistantMessage|ai:LlmError {
+        boolean hasToolCallResponse = isToolCallSupported(self.modelType);
+        ai:ChatAssistantMessage chatAssistantMessage = {role: ai:ASSISTANT};
+        if hasToolCallResponse {
+            chatAssistantMessage.content = message?.content;
+            chat:ChatCompletionRequestAssistantMessage_function_call? functionCall = message?.function_call;
+            if functionCall is chat:ChatCompletionRequestAssistantMessage_function_call {
+                chatAssistantMessage.toolCalls = [
+                    {
+                        name: functionCall.name,
+                        arguments: functionCall.arguments
+                    }
+                ];
+            }
+            return chatAssistantMessage;
+        }
+        ai:LlmToolResponse|ai:LlmChatResponse parsedReActResponse = check parseReActLlmResponse(message?.content);
+        if parsedReActResponse is ai:LlmToolResponse {
+            chatAssistantMessage.toolCalls = [
+                {
+                    name: parsedReActResponse.name,
+                    arguments: parsedReActResponse.arguments.toJsonString()
+                }
+            ];
+        } else {
+            // Set the "Final Answer" action's input to the chat assistant message content
+            chatAssistantMessage.content = parsedReActResponse.content;
+        }
+        return chatAssistantMessage;
+    }
+}
+
+isolated function mapFunctionCallToJsonBlob(ai:FunctionCall toolCall) returns chat:ChatCompletionRequestAssistantMessage {
+    return {
+        role: "assistant",
+        content: string `${BACKTICKS}json
+{
+    "${ACTION_KEY}": "${toolCall.name}",
+    "${ACTION_INPUT_KEY}": ${toolCall.arguments.toJsonString()}
+}
+${BACKTICKS}`
+    };
+}
+
+isolated function mapToFinalAnswer(string input) returns chat:ChatCompletionRequestAssistantMessage {
+    return {
+        role: "assistant",
+        content: string `${BACKTICKS}json
+{
+    "${ACTION_KEY}": "${FINAL_ANSWER_KEY}",
+    "${ACTION_INPUT_KEY}": "${input}"
+}
+${BACKTICKS}`
+    };
 }
