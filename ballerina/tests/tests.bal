@@ -333,3 +333,23 @@ function testGenerateMethodWithTextChunk() returns error? {
     Review r = check review.fromJsonStringWithType();
     test:assertEquals(result, [r, r]);
 }
+
+@test:Config
+function testParallelToolCalling() returns ai:Error? {
+    ai:ChatCompletionFunctions[] tools = [
+        { name: "getWeather", description: "Get weather for a city",
+          parameters: { "type": "object", "properties": { "city": { "type": "string" } } } },
+        { name: "getTime", description: "Get current time for a city",
+          parameters: { "type": "object", "properties": { "city": { "type": "string" } } } }
+    ];
+
+    ai:ChatAssistantMessage result = check provider->chat(
+        [{ role: ai:USER, content: "What is the weather and time in London?" }],
+        tools
+    );
+
+    ai:FunctionCall[]? toolCalls = result.toolCalls;
+    test:assertTrue(toolCalls is ai:FunctionCall[]);
+    test:assertTrue((<ai:FunctionCall[]>toolCalls).length() > 1);
+}
+

@@ -107,7 +107,19 @@ public isolated distinct client class ModelProvider {
         };
         boolean supportsToolCalls = isToolCallSupported(self.modelType);
         if supportsToolCalls && tools.length() > 0 {
-            request.functions = tools;
+            chat:ChatCompletionTool[] chatTools = [];
+            foreach ai:ChatCompletionFunctions tool in tools {
+                chat:FunctionParameters|error params = tool.parameters.cloneWithType();
+                chatTools.push({
+                    'type: "function",
+                    'function: {
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: params is chat:FunctionParameters ? params : ()
+                    }
+                });
+            }
+            request.tools = chatTools;
             span.addTools(tools);
         }
 
@@ -191,8 +203,12 @@ public isolated distinct client class ModelProvider {
                     content: check getChatMessageStringContent(message.content),
                     name: message.name
                 });
-            } else if message is ai:ChatFunctionMessage|ai:ChatAssistantMessage {
-                chatCompletionRequestMessages.push(message);
+            } else if message is ai:ChatFunctionMessage {
+                chatCompletionRequestMessages.push(<chat:ChatCompletionRequestToolMessage>{
+                    role: "tool",
+                    tool_call_id: message.id ?: message.name,
+                    content: message.content ?: ""
+                });
             }
         }
         return chatCompletionRequestMessages;
@@ -204,11 +220,14 @@ public isolated distinct client class ModelProvider {
         boolean supportsToolCalls = isToolCallSupported(self.modelType);
         ai:FunctionCall[]? toolCalls = message.toolCalls;
         if supportsToolCalls && toolCalls is ai:FunctionCall[] {
-            ai:FunctionCall functionCall = toolCalls[0];
-            assistantMessage.function_call = {
-                name: functionCall.name,
-                arguments: functionCall.arguments.toJsonString()
-            };
+            assistantMessage.tool_calls = toolCalls.map(tc => <chat:ChatCompletionMessageToolCall>{
+                id: tc.id ?: "",
+                'type: "function",
+                'function: {
+                    name: tc.name,
+                    arguments: tc.arguments.toJsonString()
+                }
+            });
         } else if !supportsToolCalls && toolCalls is ai:FunctionCall[] {
             assistantMessage.content = formatFunctionCallToJsonWithFences(toolCalls[0]);
         }
@@ -228,15 +247,19 @@ public isolated distinct client class ModelProvider {
             ai:ChatAssistantMessage chatAssistantMessage = {role: ai:ASSISTANT};
             if hasToolCallResponse {
                 chatAssistantMessage.content = message?.content;
-                chat:ChatCompletionRequestAssistantMessage_function_call? functionCall = message?.function_call;
-                if functionCall is chat:ChatCompletionRequestAssistantMessage_function_call {
-                    json arguments = check functionCall.arguments.fromJsonString();
-                    chatAssistantMessage.toolCalls = [
-                        {
-                            name: functionCall.name,
-                            arguments: check arguments.cloneWithType()
-                        }
-                    ];
+                chat:ChatCompletionMessageToolCall[]? toolCalls = message?.tool_calls;
+                if toolCalls is chat:ChatCompletionMessageToolCall[] && toolCalls.length() > 0 {
+                    ai:FunctionCall[] functionCalls = [];
+                    foreach chat:ChatCompletionMessageToolCall tc in toolCalls {
+                        json arguments = check tc.'function.arguments.fromJsonString();
+                        map<json>? args = check arguments.cloneWithType();
+                        functionCalls.push({
+                            id: tc.id,
+                            name: tc.'function.name,
+                            arguments: args
+                        });
+                    }
+                    chatAssistantMessage.toolCalls = functionCalls;
                 }
                 return chatAssistantMessage;
             }
