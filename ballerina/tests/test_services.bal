@@ -25,18 +25,25 @@ service /llm on new http:Listener(8080) {
         test:assertEquals(payload.model, GPT_4O);
         chat:ChatCompletionRequestMessage[] messages = check (check payload.messages).fromJsonWithType();
         chat:ChatCompletionRequestMessage message = messages[0];
+        test:assertEquals(message.role, "user");
 
-        chat:ChatCompletionRequestUserMessageContentPart[]? content = check message["content"].ensureType();
-        if content is () {
-            test:assertFail("Expected content in the payload");
+        json contentJson = check message.toJson().content;
+
+        // chat() sends content as a plain string; generate() sends a content parts array
+        if contentJson is string {
+            chat:ChatCompletionTool[]? tools = check (check payload.tools).fromJsonWithType();
+            if tools is () || tools.length() == 0 {
+                test:assertFail("No tools in the payload");
+            }
+            return getParallelToolCallResponse();
         }
 
+        chat:ChatCompletionRequestUserMessageContentPart[] content = check contentJson.fromJsonWithType();
         chat:ChatCompletionRequestUserMessageContentPart initialContentPart = content[0];
         TextContentPart initialTextContent = check initialContentPart.ensureType();
         string initialText = initialTextContent.text;
         test:assertEquals(content, getExpectedContentParts(initialText),
                 string `Test failed for prompt with initial content, ${initialText}`);
-        test:assertEquals(message.role, "user");
         chat:ChatCompletionTool[]? tools = check (check payload.tools).fromJsonWithType();
         if tools is () || tools.length() == 0 {
             test:assertFail("No tools in the payload");

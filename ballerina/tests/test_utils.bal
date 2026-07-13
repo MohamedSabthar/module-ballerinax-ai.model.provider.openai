@@ -265,6 +265,37 @@ isolated function getTheMockLLMResult(string message) returns string {
     return "INVALID";
 }
 
+isolated function getParallelToolCallResponse() returns chat:CreateChatCompletionResponse => {
+    id: "test-parallel-id",
+    'object: "chat.completion",
+    created: 1234567890,
+    model: "gpt-4o",
+    choices: [
+        {
+            finish_reason: "tool_calls",
+            index: 0,
+            logprobs: (),
+            message: {
+                content: (),
+                refusal: (),
+                role: "assistant",
+                tool_calls: [
+                    {
+                        id: "call_weather",
+                        'type: "function",
+                        'function: {name: "getWeather", arguments: "{\"city\": \"London\"}"}
+                    },
+                    {
+                        id: "call_time",
+                        'type: "function",
+                        'function: {name: "getTime", arguments: "{\"city\": \"London\"}"}
+                    }
+                ]
+            }
+        }
+    ]
+};
+
 isolated function getTestServiceResponse(string content) returns chat:CreateChatCompletionResponse =>
     {
     id: "test-id",
